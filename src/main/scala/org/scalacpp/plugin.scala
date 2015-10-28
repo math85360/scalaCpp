@@ -38,7 +38,7 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
   class Transformer(unit: global.CompilationUnit) extends TypingTransformer(unit) {
     override def transform(tree: global.Tree): global.Tree = {
       //unit.source.path
-      System.err.println(tree)
+      //System.err.println(tree)
       System.err.println(parseTree(tree))
       tree
     }
@@ -109,8 +109,16 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
         case Select(qlf, name) =>
           val lhs = qlf.toString
           name.toString match {
+            case "$eq$eq" => lhs + " == "
             case "$plus" => lhs + " + "
+            case "$minus" => lhs + " - "
+            case "*" => lhs + " * "
+            case "$div" => lhs + " / "
+            case "$bang$eq" => lhs + " != "
+            case "$less" => lhs + " < "
+            case "$less$eq" => lhs + " <= "
             case "$greater" => lhs + " > "
+            case "$greater$eq" => lhs + " >= "
             case _ => qlf + " | " + name + " | " + ctx.currentLevel
           }
         case Select(qlf, name) => qlf + " | " + name + " | " + ctx.currentLevel
