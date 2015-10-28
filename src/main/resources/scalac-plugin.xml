@@ -1,0 +1,4 @@
+<plugin>
+	<name>scalacpp</name>
+	<classname>org.scalacpp.ScalaCppPlugin</classname>
+</plugin>
