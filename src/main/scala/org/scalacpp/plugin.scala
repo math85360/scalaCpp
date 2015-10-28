@@ -38,17 +38,18 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
   class Transformer(unit: global.CompilationUnit) extends TypingTransformer(unit) {
     override def transform(tree: global.Tree): global.Tree = {
       //unit.source.path
+      System.err.println(tree)
       System.err.println(parseTree(tree))
       tree
     }
     implicit def termToOptionString(x: TermName) = if (x.isEmpty || "App" == x.toString) None else Some(x.toString)
     implicit def typeToOptionString(x: TypeName) = if (x.isEmpty) None else Some(x.toString)
     implicit def refToOptionString(x: RefTree) = if (!x.isDef) None else Some(x.toString)
-    def parseTree(tree: global.Tree)(implicit parameters: Parameters = Parameters(Seq(), Seq())): String = {
+    def parseTree(tree: global.Tree)(implicit ctx: Context = Context(Seq(), Seq())): String = {
       tree match {
         case PackageDef(ref, lst) =>
           //System.err.println("package is "+ref.name)
-          lst.map(parseTree(_)(parameters.copy(_packageName = ref))).mkString("\n")
+          lst.map(parseTree(_)(ctx.copy(_packageName = ref))).mkString("\n")
         case ClassDef(modifiers, tpeName, tparams, impl) =>
           //System.err.println("class "+tpeName)
           var visited = Seq[Tree]()
@@ -63,75 +64,78 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
           }).toMap
           "[module] " + impl.body.map(parseTree(_)(parameters.copy(_clsName = tpeName, _indent = 1, _variables =
           map))).mkString("\n")*/
-          impl.body.collect({
-            case ValDef(mods, name, tpt, rhs) => (name.toString.trim, name.toString.trim + "_")
-          }).mkString(";\n")
-        case q"$mods def $name[..$tparams](...$vparams):$tpt = $rhs" => //DefDef(mods, name, tparams, vparams, tpt, rhs) =>
-          //System.err.println(parameters.toString + "_" + name)
-          //System.err.println(tparams.toString)
-          //System.err.println(vparams.toString)
-          val map = vparams.flatten.map(x => x.name.toString).map(x => (x.trim(), x.trim() + "_")).toMap
-          val internalVar = parameters.copy(_variables = map)
-          "[method] " + applyModifiers(mods) + getTypeFromScala(tpt).cppType + " " + parameters.methodName(name.toString) + "(" + convertArgList(vparams)(internalVar) + ") {\n" +
-            (rhs match {
-              case Literal(Constant(())) => "(empty)"
-              case _ if tpt.toString.trim() equals "Unit" => "(void) " + parseTree(rhs)(internalVar.copy(_indent = 1)) + ";"
-              case Block(lst, tpe) => "(block) " + lst.map(parseTree(_)(internalVar.copy(_indent = 1))).mkString(";\n") + "\nreturn " + parseTree(tpe)(internalVar.copy(_indent = 1))
-              case _ => "(return) return " + parseTree(rhs)(internalVar.copy(_indent = 1)) + ";"
-              //case Block(lst, tpe) => lst.map(parseTree(_)(parameters.copy(_indent = 1))).mkString("\n") + "\nreturn " + parseTree(tpe)(parameters.copy(_indent = 1))
-              //case _ => "****"+rhs.getClass.toString
-              //case _ => parseTree(rhs)
-            }) + "\n}"
-        case Literal(Constant(())) => "[4] "
-        case Literal(Constant(x)) => f"[5] $x"
-        //case x: Select if parameters.variables.contains(x.toString.trim) => f"[6a] ${getMethod(x)}"
-        case x: Select => f"[6] ${getMethod(x)}"
-        case Block(lst, tpe) => "[7] " + lst.map(parseTree(_)(parameters.copy(_indent = 1))).mkString("\n") + "\n" + parseTree(tpe)
-        //tpe.toString
-        case q"$mods val $name: $tpt = $rhs" =>
-          f"[8] ${getTypeFromScala(tpt).cppType} ${parameters.getVariableName(name)} = ${parseTree(rhs)};"
-        case q"$mods var $name: $tpt = $rhs" =>
-          if (rhs.isEmpty) {
-            val r = tpt.toString match {
-              case "Long" => 0
-              case "String" => "\"\""
-            }
-            f"${getTypeFromScala(tpt).cppType} ${parameters.getVariableName(name)} = $r;"
-          } else {
-            f"${getTypeFromScala(tpt).cppType} ${parameters.getVariableName(name)} = ${parseTree(rhs)};"
+          val map = impl.body.collect({
+            case x @ ValDef(mods, name, tpt, rhs) => (name, "$" + name.toString.trim)
+            case x @ DefDef(mods, name, tparams, vparams, tpt, rhs) => (name, name.toString.trim) //(name.toString.trim, name.toString.trim)
+            //case ValDef(mods, name, tpt, rhs) => (name.toString.trim, name.toString.trim + "_")
+            //case DefDef(mods, name, tparams, vparams, tpt, rhs) => (name.toString.trim, name.toString.trim)
+          }).toMap
+          val newCtx = ctx.copy(_clsName = tpeName, _names = map)
+          impl.body.map(parseTree(_)(newCtx)).mkString("\n\n")
+        case ValDef(mods, name, tpt, rhs) =>
+          val tpe = getTypeFromScala(tpt)
+          val res = (if (rhs.isEmpty) tpe.defaultValue else parseTree(rhs))
+          try {
+            s"${tpe.cppType} ${ctx.names(name)} = $res"
+          } catch {
+            case e: Throwable =>
+              System.out.println(ctx.names.keys)
+              throw e
           }
-        case Literal(x) => f"[A] $x"
-        case q"$tpname.this" if tpname.toString == "App" => "[B]"
-        case q"$tpname.this" => f"[C] $tpname"
-        case q"$lhs = $rhs" => f"[D] ${parseTree(lhs)}=${parseTree(rhs)}"
-        case q"if ($cond) $lhs else $rhs" =>
-          f"""[E] if(${parseTree(cond)}) {
-            ${parseTree(lhs)};
-            [E]}else{
-            ${parseTree(rhs)};
-            }""".stripMargin
-        /*"if(" + parseTree(cond)(parameters.copy(_indent = 1)) + ") {\n" +
-            parseTree(lhs)(parameters.copy(_indent = 1)) + ";\n" +
-            "}else{\n" +
-            parseTree(rhs)(parameters.copy(_indent = 1)) + ";\n}"*/
-        case q"$method(...$args)" if parameters.variables.contains(method.toString.trim) => f"${parameters.variables(method.toString.trim)}"
-        case q"$method(...$args)" => f"[F] ${method.toString}(${convertArgsCall(args)})"
+        case DefDef(mods, name, tparams, vparams, tpt, rhs) =>
+          val tpe = getTypeFromScala(tpt)
+          //val body = if(tpe.scalaType=="Unit") parseTree(rhs)
+          //val body = if(tpe.scalaType=="U")
+          /*System.out.println(vparams.flatten.collect({
+            case ValDef(_,y,_,_) => "-"+y+"-"
+            case x => x.toString
+          }).mkString("["," ** ","]"))*/
+          val map = (vparams.flatten.collect({
+            case x @ ValDef(mods, name, tpt, rhs) => (name, "$" + name.toString.trim)
+          }) ++ (rhs.collect({ case x @ ValDef(_, name, tpt, _) => (name, "$" + name.toString.trim) }))).toMap
+          val args = vparams.flatten.collect({ case x @ ValDef(_, name, tpt, _) => getTypeFromScala(tpt).cppType + " $" + name.toString.trim }).mkString(",")
+          val newCtx = ctx.copy(_names = map)
+          val z = newCtx.names.keys
+          val body = rhs match {
+            case x if tpe.scalaType == "Unit" => parseTree(rhs)(newCtx) + ";"
+            case Block(lh, rh) => lh.map(parseTree(_)(newCtx)).mkString(";\n") + ";\nreturn " + parseTree(rh)(newCtx) + ";\n"
+            case _ => "return " + parseTree(rhs)(newCtx) + ";"
+          }
+          s"${tpe.cppType} ${newCtx.names(name)}($args) {\n$body\n}"
+        case Block(lhs, rhs) => lhs.map(parseTree(_)).mkString(";\n") + ";\n" + parseTree(rhs)
+        case Assign(lhs, rhs) => parseTree(lhs) + " = " + parseTree(rhs)
+        case Apply(qlf, name) if true =>parseTree(qlf) + "(" + name.map(parseTree(_)).mkString(", ") + ")"
+        case Select(qlf, name: TermName) if qlf.toString == (ctx.currentLevel + ".this") => ctx.names(name)
+        case Select(qlf, name) =>
+          val lhs = qlf.toString
+          name.toString match {
+            case "$plus" => lhs + " + "
+            case "$greater" => lhs + " > "
+            case _ => qlf + " | " + name + " | " + ctx.currentLevel
+          }
+        case Select(qlf, name) => qlf + " | " + name + " | " + ctx.currentLevel
+        case Literal(Constant(())) => ""
+        case If(cond, lhs, rhs) =>
+          val r = if (rhs.isEmpty) "" else s"else {${parseTree(rhs)}}"
+          s"if(${parseTree(cond)}) {${parseTree(lhs)}})"
+        case x @ Literal(z @ Constant(v)) => if (z.isNumeric) v.toString else z.escapedStringValue
+        case x @ Ident(v:TermName) => ctx.names(v).toString 
         case x =>
-          "[H] !!!" + (x.getClass.toString) + " " + (x.toString)
+          "/*" + x.toString + "-" + x.getClass.getSimpleName + "*/"
       }
     }
 
-    def getMethod(v: Tree)(implicit parameters: Parameters): String = {
+    /*def getMethod(v: Tree)(implicit ctx: Context): String = {
       v match {
-        case Select(qualifier, name) if qualifier.toString().endsWith(".this") => parameters.variables.getOrElse(name.toString.trim, f"$name")
+        case Select(qualifier, name) if qualifier.toString().endsWith(".this") => ctx.variables.getOrElse(name.toString.trim, f"$name")
         case Select(qualifier, name) => f"$qualifier.$name"
         case Ident(name) => f"${parameters.variables.getOrElse(name.toString.trim, name.toString.trim)}"
       }
-    }
+    }*/
 
-    def convertArgList(lst: List[List[ValDef]])(implicit parameters: Parameters) = {
+    /*def convertArgList(lst: List[List[ValDef]])(implicit parameters: Context) = {
       lst.flatten.map(x => getTypeFromScala(x.tpt).cppType + " " + parameters.variables(x.name.toString)).mkString(", ")
-    }
+    }*/
     def convertArgsCall(lst: List[List[Tree]]) = {
       lst.flatten.map(x => parseTree(x)).mkString(", ")
     }
@@ -161,33 +165,27 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
     def getTypeFromScala(tree: Tree): ScalaToCppType = getTypeFromScala(tree.toString.trim)
   }
 
-  case class Parameters(
+  case class Context(
       packageName: Seq[String],
       clsName: Seq[String],
       indent: Int = 0,
-      variables: Map[String, String] = Map()) {
+      names: Map[TermName, String] = Map()) {
     def copy(
       _packageName: Option[String] = None,
-      _clsName: Option[String] = None,
+      _clsName: TermName = null,
       _indent: Int = 0,
-      _variables: Map[String, String] = Map()) =
-      new Parameters(
+      _names: Map[TermName, String] = Map()) =
+      new Context(
         packageName ++ _packageName,
-        clsName ++ _clsName,
+        (if (_clsName == null) clsName else (clsName :+ _clsName.toString())),
         indent + _indent,
-        variables ++ _variables)
+        names ++ _names)
 
     def bol = "  " * (indent * 2)
     def methodName(name: String) = ((Seq[String]() ++ packageName ++ clsName) :+ name).map(_.replace('.', '_')).mkString("_")
-    def getVariableName(name: String): String = variables(name.trim)
-    def getVariableName(name: TermName): String = getVariableName(name.toString)
-    def getVariableName(name: Name): String = getVariableName(name.toString)
+    def currentLevel = (packageName ++ clsName).mkString(".")
   }
 
 }
 
 case class ScalaToCppType(scalaType: String, cppType: String, defaultValue: String)
-
-object Parameters {
-
-}
