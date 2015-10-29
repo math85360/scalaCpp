@@ -50,6 +50,10 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
       val optCls = Option(cls)
       val optMod = Option(mod)
       val optUnion = optCls ++ optMod
+      val clsName = optUnion.collectFirst({
+        case ClassDef(_, tpeName, _, _) => tpeName.toTermName
+        case ModuleDef(_, tpeName, _) => tpeName
+      }).get
       val bodies = optUnion.map(_.impl.body).flatten.filter({
         case x @ DefDef(_, name, _, _, _, _) if name.decoded.endsWith("<init>") => false
         case _ => true
@@ -60,16 +64,16 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
         //case ValDef(mods, name, tpt, rhs) => (name.toString.trim, name.toString.trim + "_")
         //case DefDef(mods, name, tparams, vparams, tpt, rhs) => (name.toString.trim, name.toString.trim)
       }).toMap
-      val name = optUnion.collectFirst({
-        case ClassDef(_, tpeName, _, _) => tpeName.toTermName
-        case ModuleDef(_, tpeName, _) => tpeName
-      }).get
-      val newCtx = ctx.copy(_clsName = name, _names = map, _prefix = name.decoded + "::")
+
+      val newCtx = ctx.copy(_clsName = clsName, _names = map, _prefix = clsName.decoded + "::")
       bodies.collect({
-        case x @ ValDef(mods, name, tpt, _) => getTypeFromScala(tpt).cppType + " " + newCtx.names(name).toString + ";"
-        case x @ DefDef(mods, name, _, vparams, tpt, _) => getTypeFromScala(tpt).cppType + " " + newCtx.names(name).toString + "("+getArgs(vparams)+");"
-      }).mkString(f"class $name\n{\n", "\n", "\n}\n") +
-        bodies.map(parseTree(_)(newCtx)).mkString("\n\n")
+        case x @ ValDef(mods, name, tpt, _) => "static " + getTypeFromScala(tpt).cppType + " " + newCtx.names(name).toString + ";"
+        case x @ DefDef(mods, name, _, vparams, tpt, _) => "static " + getTypeFromScala(tpt).cppType + " " + newCtx.names(name).toString + "(" + getArgs(vparams) + ");"
+      }).mkString(f"class $clsName\n{\npublic:\n", "\n", "\n};\n") +
+        bodies.map(x => (x, parseTree(x)(newCtx))).map({
+          case (x: ValDef, a) => a + ";"
+          case (_, a) => a
+        }).mkString("\n\n")
       //optUnion.map(_.impl.body).flatten.map(parseTree(_)(newCtx)).mkString(f"class $name {\n", "\n\n", "\n}")
     }
     def parseTree(tree: global.Tree)(implicit ctx: Context = Context(Seq(), Seq())): String = {
@@ -151,10 +155,10 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
         case Select(qlf, name) => qlf + " | " + name + " | " + ctx.currentLevel
         case Literal(Constant(())) => ""
         case If(cond, lhs, rhs) =>
-          val r = if (rhs.isEmpty) "" else s"else {${parseTree(rhs)}}"
-          s"if(${parseTree(cond)}) {${parseTree(lhs)}})"
+          val r = if (rhs.isEmpty) "" else s"else {${parseTree(rhs)};}"
+          s"if(${parseTree(cond)}) {${parseTree(lhs)};}"
         case x @ Literal(z @ Constant(v)) => if (z.isNumeric) v.toString else z.escapedStringValue
-        case x @ Ident(v: TermName) => ctx.names(v).toString
+        case x @ Ident(v: TermName) => ctx.prefix + ctx.names(v).toString
         case x =>
           "/*" + x.toString + "-" + x.getClass.getSimpleName + "*/"
       }
