@@ -74,7 +74,6 @@ class ScalaCppCompiler(settings: scala.tools.nsc.Settings, reporter: ConsoleRepo
       analyzer.namerFactory -> "resolve names, attach symbols to named trees",
       analyzer.packageObjects -> "load package objects",
       analyzer.typerFactory -> "the meat and potatoes: type the trees",
-      scalacpp -> "scalacpp",
       patmat -> "translate match expressions",
       superAccessors -> "add super accessors in traits and nested classes",
       extensionMethods -> "add extension methods for inline classes",
@@ -90,12 +89,14 @@ class ScalaCppCompiler(settings: scala.tools.nsc.Settings, reporter: ConsoleRepo
       lambdaLift -> "move nested functions to top level",
       constructors -> "move field definitions into constructors",
       mixer -> "mixin composition",
+      scalacpp -> "scalacpp",
       cleanup -> "platform-specific cleanups, generate reflective calls",
       genicode -> "generate portable intermediate code",
       inliner -> "optimization: do inlining",
       inlineExceptionHandlers -> "optimization: inline exception handlers",
       closureElimination -> "optimization: eliminate uncalled closures",
       deadCode -> "optimization: eliminate dead code",
+      
       terminal -> "The last phase in the compiler chain")
     phs foreach (addToPhasesSet _).tupled
   }

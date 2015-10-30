@@ -24,3 +24,5 @@ libraryDependencies ++= Seq(
   "com.typesafe.akka"               %%    "akka-actor"            % "2.3.4"       % "test",
   "org.scaldi"                      %%    "scaldi"                % "0.4"         % "test"
 )
+
+scalacOptions ++= Seq("-feature", "-deprecation")

@@ -23,12 +23,14 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
   import global._
 
   override val phaseName = "scalacpp"
-  override val runsAfter = List[String]("typer")
-  override val runsBefore = List[String]("patmat")
+  //override val runsRightAfter = Some(global.refChecks.phaseName)
+  override val runsAfter = List[String](global.analyzer.typerFactory.phaseName)
+  override val runsBefore = List[String](global.patmat.phaseName)
 
   override def newPhase(prev: scala.tools.nsc.Phase) = new Phase(prev) {
     override def run(): Unit = {
       super.run()
+      //System.err.println("phase scalacpp")
     }
   }
 
@@ -50,21 +52,23 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
       val optCls = Option(cls)
       val optMod = Option(mod)
       val optUnion = optCls ++ optMod
+      def onlyBody: PartialFunction[Tree, Boolean] = {
+        case x @ DefDef(_, name, _, _, _, _) if name.decoded.endsWith("<init>") => false
+        case x => true
+      }
+      val bodyCls = optCls.map(_.impl.body.filter(onlyBody)).getOrElse(List())
+      val bodyMod = optMod.map(_.impl.body.filter(onlyBody)).getOrElse(List())
       val clsName = optUnion.collectFirst({
         case ClassDef(_, tpeName, _, _) => tpeName.toTermName
-        case ModuleDef(_, tpeName, _) => tpeName
+        case ModuleDef(_, tpeName, _)   => tpeName
       }).get
-      val bodies = optUnion.map(_.impl.body).flatten.filter({
-        case x @ DefDef(_, name, _, _, _, _) if name.decoded.endsWith("<init>") => false
-        case _ => true
-      })
       val map = optUnion.map({ kv =>
         val (tpeName, impl) = kv match {
           case ClassDef(_, name, _, impl) => (name, impl)
-          case ModuleDef(_, name, impl) => (name, impl)
+          case ModuleDef(_, name, impl)   => (name, impl)
         }
         impl.body.collect({
-          case x @ ValDef(mods, name, tpt, rhs) => (name, (tpeName.decoded + "::", "$" + name.toString.trim))
+          case x @ ValDef(mods, name, tpt, rhs)                   => (name, (tpeName.decoded + "::", "$" + name.toString.trim))
           case x @ DefDef(mods, name, tparams, vparams, tpt, rhs) => (name, (tpeName.decoded + "::", name.toString.trim)) //(name.toString.trim, name.toString.trim)
           //case ValDef(mods, name, tpt, rhs) => (name.toString.trim, name.toString.trim + "_")
           //case DefDef(mods, name, tparams, vparams, tpt, rhs) => (name.toString.trim, name.toString.trim)
@@ -72,13 +76,22 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
       }).flatten.toMap
 
       val newCtx = ctx.copy(_clsName = clsName, _names = map)
-      bodies.collect({
-        case x @ ValDef(mods, name, tpt, _) => "static " + getTypeFromScala(tpt).cppType + " " + newCtx.names(name)._2 + ";"
-        case x @ DefDef(mods, name, _, vparams, tpt, _) => "static " + getTypeFromScala(tpt).cppType + " " + newCtx.names(name)._2 + "(" + getArgs(vparams) + ");"
-      }).mkString(f"class $clsName\n{\npublic:\n", "\n", "\n};\n") +
-        bodies.map(x => (x, parseTree(x)(newCtx))).map({
+      def modifier(mods:Modifiers) = {
+        if(mods.isPrivate)
+          "private:"
+        else
+          "public:"
+      }
+      def members(v: String): PartialFunction[Tree, (String,String)] = {
+        case x @ ValDef(mods, name, tpt, _)             => (modifier(mods), v + getTypeFromScala(tpt).cppType + " " + newCtx.names.get(name).map(_._2).getOrElse(f"not found $name") + ";")
+        case x @ DefDef(mods, name, _, vparams, tpt, _) => (modifier(mods), v + getTypeFromScala(tpt).cppType + " " + newCtx.names.get(name).map(_._2).getOrElse(f"not found $name") + "(" + getArgs(vparams) + ");")
+      }
+      val clsFields = bodyCls.collect(members(""))
+      val modFields = bodyMod.collect(members("static "))
+      (clsFields ++ modFields).groupBy(x => x._1).map(x => x._2.map(_._2).mkString(x._1+"\n","\n","\n")).mkString(f"class $clsName\n{\n", "\n", "\n};\n\n") +
+        (bodyCls ++ bodyMod).map(x => (x, parseTree(x)(newCtx))).map({
           case (x: ValDef, a) => a + ";"
-          case (_, a) => a
+          case (_, a)         => a
         }).mkString("\n\n")
       //optUnion.map(_.impl.body).flatten.map(parseTree(_)(newCtx)).mkString(f"class $name {\n", "\n\n", "\n}")
     }
@@ -135,36 +148,44 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
           val z = newCtx.names.keys
           val body = rhs match {
             case x if tpe.scalaType == "Unit" => parseTree(rhs)(newCtx) + ";"
-            case Block(lh, rh) => lh.map(parseTree(_)(newCtx)).mkString(";\n") + ";\nreturn " + parseTree(rh)(newCtx) + ";\n"
-            case _ => "return " + parseTree(rhs)(newCtx) + ";"
+            case Block(lh, rh)                => lh.map(parseTree(_)(newCtx)).mkString(";\n") + ";\nreturn " + parseTree(rh)(newCtx) + ";\n"
+            case _                            => "return " + parseTree(rhs)(newCtx) + ";"
           }
           s"${tpe.cppType} ${newCtx.names(name)._1}${newCtx.names(name)._2}($args) {\n$body\n}"
         case Block(lhs, rhs) => lhs.map(parseTree(_)).mkString(";\n") + ";\n" + parseTree(rhs)
         case Assign(lhs, rhs) => parseTree(lhs) + " = " + parseTree(rhs)
         case Apply(qlf, name) if true => parseTree(qlf) + "(" + name.map(parseTree(_)).mkString(", ") + ")"
-        case Select(qlf, name: TermName) if qlf.toString == (ctx.currentLevel + ".this") => ctx.names(name)._1 + ctx.names(name)._2
+        case Select(qlf, name: TermName) if qlf.toString == (ctx.currentLevel + ".this") => ctx.names.get(name).map(r => r._1 + r._2).getOrElse(name.toString)
         case Select(qlf, name) =>
           val lhs = ctx.names.get(qlf.toString).map(x => x._1 + x._2).getOrElse(parseTree(qlf))
           name.toString match {
-            case "$eq$eq" => lhs + " == "
-            case "$plus" => lhs + " + "
-            case "$minus" => lhs + " - "
-            case "*" => lhs + " * "
-            case "$div" => lhs + " / "
-            case "$bang$eq" => lhs + " != "
-            case "$less" => lhs + " < "
-            case "$less$eq" => lhs + " <= "
-            case "$greater" => lhs + " > "
+            case "$eq$eq"      => lhs + " == "
+            case "$plus"       => lhs + " + "
+            case "$minus"      => lhs + " - "
+            case "*"           => lhs + " * "
+            case "$div"        => lhs + " / "
+            case "$bang$eq"    => lhs + " != "
+            case "$less"       => lhs + " < "
+            case "$less$eq"    => lhs + " <= "
+            case "$greater"    => lhs + " > "
             case "$greater$eq" => lhs + " >= "
-            case method => lhs + "." + method
-            case _ => lhs + " | " + qlf + " | " + name + " | " + ctx.currentLevel
+            case method        => lhs + "." + method
+            case _             => lhs + " | " + qlf + " | " + name + " | " + ctx.currentLevel
           }
         case Literal(Constant(())) => ""
         case If(cond, lhs, rhs) =>
           val r = if (rhs.isEmpty) "" else s"else {${parseTree(rhs)};}"
           s"if(${parseTree(cond)}) {${parseTree(lhs)};}"
         case x @ Literal(z @ Constant(v)) => if (z.isNumeric) v.toString else z.escapedStringValue
-        case x @ Ident(v: TermName) => ctx.names(v)._1 + ctx.names(v)._2
+        case x @ Ident(v: TermName)       => ctx.names.get(v).map(r => r._1 + r._2).getOrElse(v.toString)
+        case Match(select, cases) =>
+          val selector = parseTree(select)
+          cases.map({
+            case CaseDef(pat, EmptyTree, body) =>
+              f"if(${parseTree(pat)}==$selector) {\n${parseTree(body)}\n}"
+            case CaseDef(pat, guard, body) =>
+              f"if(${parseTree(pat)}==$selector && ${parseTree(guard)}) {\n${parseTree(body)}\n}"
+          }).mkString("", "\nelse \n", "")
         case x =>
           "/*" + x.toString + "-" + x.getClass.getSimpleName + "*/"
       }

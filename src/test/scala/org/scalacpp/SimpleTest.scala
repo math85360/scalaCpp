@@ -11,7 +11,9 @@ class SimpleTest extends FreeSpec with Matchers with PluginRunner with OneInstan
   "Basic sample" - {
     "should be ok" in {
       val code = """
+        |//import scala.language.implicitConversions
         |object App {
+        |  //implicit def longToString(x:Long) = f"[$x]"
         |  var last_event : Long = -3600000
         |  
         |  var lastMessage : String = _
@@ -30,13 +32,19 @@ class SimpleTest extends FreeSpec with Matchers with PluginRunner with OneInstan
         |
         |  def loop() {
         |    current = millis()
-        |    val data = "test"
-        |    if(data.length() > 0) updateStrip(data)
+        |    val data = Message(current, "test")
+        |    if(data.msg.length() > 0) updateStrip(data.msg)
+        |    data match {
+        |      case Message(_, "test") => updateStrip("TEeeessssttt !")
+        |      case Message(tm, msg) => updateStrip(msg+" "+tm)
+        |    }
         |  }
         |  def millis() : Long = -1
         |  
         |  private def test2args(x:Long,y:Long) = x+y
-        |}""".stripMargin
+        |  
+        |}
+        |case class Message(date:Long, msg:String)""".stripMargin
       compileCodeSnippet(code)
     }
   }
