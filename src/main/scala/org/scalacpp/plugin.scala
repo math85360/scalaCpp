@@ -4,6 +4,13 @@ import scala.tools.nsc._
 import scala.tools.nsc.plugins.{ Plugin, PluginComponent }
 import scala.tools.nsc.transform.{ Transform, TypingTransformers }
 import java.io.Console
+import java.io.{ StringWriter, PrintWriter, File }
+import scala.collection.mutable.ArrayBuffer
+import scala.reflect.internal.util.SourceFile
+import java.nio.file.Paths
+import java.nio.file.Files
+import org.scalacpp.cppast._
+import scala.language.implicitConversions
 
 /**
  * @author mathi_000
@@ -13,12 +20,12 @@ class ScalaCppPlugin(val global: Global) extends Plugin {
 
   override val description = "scala to c++ compiler plugin"
 
-  val component = new ScalaCppComponent(global)
+  val component = new ScalaCppComponent()(global)
 
   override val components = List[PluginComponent](component)
 }
 
-class ScalaCppComponent(val global: Global) extends PluginComponent with TypingTransformers with Transform {
+class ScalaCppComponent(implicit val global: Global) extends PluginComponent with TypingTransformers with Transform {
 
   import global._
 
@@ -38,20 +45,43 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
     new Transformer(unit)
   }
   class Transformer(unit: global.CompilationUnit) extends TypingTransformer(unit) {
+    private def writeToFile(lines: String, programName: String) = {
+      val bytes = lines.getBytes("UTF-8")
+      val folder = Paths.get("target")
+      if (!Files.exists(folder)) Files.createDirectories(folder)
+      val path = Paths.get(folder.toString(), s"${programName}.cpp")
+      Files.write(path, bytes)
+      path
+    }
     override def transform(tree: global.Tree): global.Tree = {
       //unit.source.path
       //System.err.println(tree)
-      System.err.println(parseTree(tree))
+      val source = parseTree(tree)
+      //writeSourceCode(unit, source, "arduino")
+      //Paths.
+      //val folder = Paths.get("target","cpp")
+
+      writeToFile(source, Paths.get(unit.source.file.name).getFileName.toString())
+      // TODO : Add generated files / resources files
+      //global.newCompilationUnit(code, filename)
+      //System.err.println(source)
       tree
     }
     implicit def termToOptionString(x: TermName) = if (x.isEmpty || "App" == x.toString) None else Some(x.toString)
     implicit def typeToOptionString(x: TypeName) = if (x.isEmpty) None else Some(x.toString)
     implicit def refToOptionString(x: RefTree) = if (!x.isDef) None else Some(x.toString)
 
-    def parseClass(cls: ClassDef = null, mod: ModuleDef = null)(implicit ctx: Context): String = {
+    def parseClass(cls: ClassDef = null, mod: ModuleDef = null)(implicit ctx: Context): CppClass = {
       val optCls = Option(cls)
       val optMod = Option(mod)
-      val optUnion = optCls ++ optMod
+      val optUnion = (optCls ++ optMod).filterNot(_.symbol.annotations.exists(_.symbol.tpe == typeOf[native]))
+      if(optUnion.isEmpty) return null
+      /*optUnion
+        .filter(_.name.toString().contains("Adafruit"))
+        .flatMap(_.symbol.annotations.map(_.symbol.tpe == typeOf[native]))
+        .map(System.err.println)*/
+      //optUnion.map (x => System.err.println(x.mods.annotations.toString()))
+      //if (!optUnion.filter(_.symbol.annotations.exists(_.symbol.tpe == typeOf[native])).isEmpty) return ""
       def onlyBody: PartialFunction[Tree, Boolean] = {
         case x @ DefDef(_, name, _, _, _, _) if name.decoded.endsWith("<init>") => false
         case x => true
@@ -60,15 +90,16 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
       val bodyMod = optMod.map(_.impl.body.filter(onlyBody)).getOrElse(List())
       val clsName = optUnion.collectFirst({
         case ClassDef(_, tpeName, _, _) => tpeName.toTermName
-        case ModuleDef(_, tpeName, _)   => tpeName
+        case ModuleDef(_, tpeName, _) => tpeName
+        //case x => s"{$x}"
       }).get
       val map = optUnion.map({ kv =>
         val (tpeName, impl) = kv match {
           case ClassDef(_, name, _, impl) => (name, impl)
-          case ModuleDef(_, name, impl)   => (name, impl)
+          case ModuleDef(_, name, impl) => (name, impl)
         }
         impl.body.collect({
-          case x @ ValDef(mods, name, tpt, rhs)                   => (name, (tpeName.decoded + "::", "$" + name.toString.trim))
+          case x @ ValDef(mods, name, tpt, rhs) => (name, (tpeName.decoded + "::", "$" + name.toString.trim))
           case x @ DefDef(mods, name, tparams, vparams, tpt, rhs) => (name, (tpeName.decoded + "::", name.toString.trim)) //(name.toString.trim, name.toString.trim)
           //case ValDef(mods, name, tpt, rhs) => (name.toString.trim, name.toString.trim + "_")
           //case DefDef(mods, name, tparams, vparams, tpt, rhs) => (name.toString.trim, name.toString.trim)
@@ -76,23 +107,24 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
       }).flatten.toMap
 
       val newCtx = ctx.copy(_clsName = clsName, _names = map)
-      def modifier(mods:Modifiers) = {
-        if(mods.isPrivate)
-          "private:"
-        else
-          "public:"
+      def modifierTo(mods: Modifiers): Boolean = mods.isPrivate
+      def members(staticMod: Boolean): PartialFunction[Tree, CppDef] = {
+        case x @ ValDef(mods, name, tpt, _) =>
+          CppField(CppModifier(staticMod, modifierTo(mods)), newCtx.names.get(name).map(_._2).getOrElse(f"$name"), CppType.fromScala(tpt), None)
+        //(modifier(mods), v + getTypeFromScala(tpt).cppType + " " + newCtx.names.get(name).map(_._2).getOrElse(f"not found $name") + ";")
+        case x @ DefDef(mods, name, _, vparams, tpt, _) =>
+          CppFunction(CppModifier(staticMod, modifierTo(mods)), newCtx.names.get(name).map(_._2).getOrElse(f"$name"), CppType.fromScala(tpt), List.empty)
+        //(modifier(mods), v + getTypeFromScala(tpt).cppType + " " + newCtx.names.get(name).map(_._2).getOrElse(f"not found $name") + "(" + getArgs(vparams) + ");")
       }
-      def members(v: String): PartialFunction[Tree, (String,String)] = {
-        case x @ ValDef(mods, name, tpt, _)             => (modifier(mods), v + getTypeFromScala(tpt).cppType + " " + newCtx.names.get(name).map(_._2).getOrElse(f"not found $name") + ";")
-        case x @ DefDef(mods, name, _, vparams, tpt, _) => (modifier(mods), v + getTypeFromScala(tpt).cppType + " " + newCtx.names.get(name).map(_._2).getOrElse(f"not found $name") + "(" + getArgs(vparams) + ");")
-      }
-      val clsFields = bodyCls.collect(members(""))
-      val modFields = bodyMod.collect(members("static "))
-      (clsFields ++ modFields).groupBy(x => x._1).map(x => x._2.map(_._2).mkString(x._1+"\n","\n","\n")).mkString(f"class $clsName\n{\n", "\n", "\n};\n\n") +
+      val clsFields = bodyCls.collect(members(false))
+      val modFields = bodyMod.collect(members(true))
+      /*(clsFields ++ modFields).groupBy(x => x._1).map(x => x._2.map(_._2).mkString(x._1 + "\n", "\n", "\n")).mkString(f"class $clsName\n{\n", "\n", "\n};\n\n") +
         (bodyCls ++ bodyMod).map(x => (x, parseTree(x)(newCtx))).map({
           case (x: ValDef, a) => a + ";"
-          case (_, a)         => a
-        }).mkString("\n\n")
+          case (_, a) => a
+        }).mkString("\n\n")*/
+
+      CppClass(CppModifier(false, false), clsName.toString(), clsFields ++ modFields)
       //optUnion.map(_.impl.body).flatten.map(parseTree(_)(newCtx)).mkString(f"class $name {\n", "\n\n", "\n}")
     }
     def parseTree(tree: global.Tree)(implicit ctx: Context = Context(Seq(), Seq())): String = {
@@ -111,8 +143,10 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
             case cls @ ClassDef(_, cName, _, _) if modules.contains(cName.decoded) => parseClass(cls = cls, mod = modules(cName.decoded))(newCtx)
             case cls @ ClassDef(_, cName, _, _) => parseClass(cls = cls)(newCtx)
             case mod @ ModuleDef(_, cName, _) if !classes.contains(cName.decoded) => parseClass(mod = mod)(newCtx)
-            case other => "/** " + other.getClass.getSimpleName + "    " + parseTree(other)(newCtx) + " **/"
-          }).mkString("\n")
+            //case other => System.err.println("Cannot transform "+other)
+            //case other => "/** " + other.getClass.getSimpleName + "    " + parseTree(other)(newCtx) + " **/"
+          }).filterNot(_==null).map(c => c.toH + "\n" + c.toCpp).mkString("\n")
+        //mkString("\n")
         //lst.map(parseTree(_)(ctx.copy(_packageName = ref))).mkString("\n")
         //case ClassDef(modifiers, tpeName, tparams, impl) =>
         //System.err.println("class "+tpeName)
@@ -148,36 +182,37 @@ class ScalaCppComponent(val global: Global) extends PluginComponent with TypingT
           val z = newCtx.names.keys
           val body = rhs match {
             case x if tpe.scalaType == "Unit" => parseTree(rhs)(newCtx) + ";"
-            case Block(lh, rh)                => lh.map(parseTree(_)(newCtx)).mkString(";\n") + ";\nreturn " + parseTree(rh)(newCtx) + ";\n"
-            case _                            => "return " + parseTree(rhs)(newCtx) + ";"
+            case Block(lh, rh) => lh.map(parseTree(_)(newCtx)).mkString(";\n") + ";\nreturn " + parseTree(rh)(newCtx) + ";\n"
+            case _ => "return " + parseTree(rhs)(newCtx) + ";"
           }
           s"${tpe.cppType} ${newCtx.names(name)._1}${newCtx.names(name)._2}($args) {\n$body\n}"
         case Block(lhs, rhs) => lhs.map(parseTree(_)).mkString(";\n") + ";\n" + parseTree(rhs)
         case Assign(lhs, rhs) => parseTree(lhs) + " = " + parseTree(rhs)
         case Apply(qlf, name) if true => parseTree(qlf) + "(" + name.map(parseTree(_)).mkString(", ") + ")"
+        // TODO See if name is native
         case Select(qlf, name: TermName) if qlf.toString == (ctx.currentLevel + ".this") => ctx.names.get(name).map(r => r._1 + r._2).getOrElse(name.toString)
         case Select(qlf, name) =>
           val lhs = ctx.names.get(qlf.toString).map(x => x._1 + x._2).getOrElse(parseTree(qlf))
           name.toString match {
-            case "$eq$eq"      => lhs + " == "
-            case "$plus"       => lhs + " + "
-            case "$minus"      => lhs + " - "
-            case "*"           => lhs + " * "
-            case "$div"        => lhs + " / "
-            case "$bang$eq"    => lhs + " != "
-            case "$less"       => lhs + " < "
-            case "$less$eq"    => lhs + " <= "
-            case "$greater"    => lhs + " > "
+            case "$eq$eq" => lhs + " == "
+            case "$plus" => lhs + " + "
+            case "$minus" => lhs + " - "
+            case "*" => lhs + " * "
+            case "$div" => lhs + " / "
+            case "$bang$eq" => lhs + " != "
+            case "$less" => lhs + " < "
+            case "$less$eq" => lhs + " <= "
+            case "$greater" => lhs + " > "
             case "$greater$eq" => lhs + " >= "
-            case method        => lhs + "." + method
-            case _             => lhs + " | " + qlf + " | " + name + " | " + ctx.currentLevel
+            case method => lhs + "." + method
+            case _ => lhs + " | " + qlf + " | " + name + " | " + ctx.currentLevel
           }
         case Literal(Constant(())) => ""
         case If(cond, lhs, rhs) =>
           val r = if (rhs.isEmpty) "" else s"else {${parseTree(rhs)};}"
           s"if(${parseTree(cond)}) {${parseTree(lhs)};}"
         case x @ Literal(z @ Constant(v)) => if (z.isNumeric) v.toString else z.escapedStringValue
-        case x @ Ident(v: TermName)       => ctx.names.get(v).map(r => r._1 + r._2).getOrElse(v.toString)
+        case x @ Ident(v: TermName) => ctx.names.get(v).map(r => r._1 + r._2).getOrElse(v.toString)
         case Match(select, cases) =>
           val selector = parseTree(select)
           cases.map({
